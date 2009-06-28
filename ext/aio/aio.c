@@ -1,5 +1,4 @@
 #include "ruby.h"
-#include "rubyio.h"
 #include <unistd.h>
 #include <stdio.h>
 #include <sys/types.h>
@@ -19,9 +18,11 @@
 #define RSTRING_LEN(obj) RSTRING(obj)->len
 #endif
 
-#ifdef HAVE_RBTRAP
-  #include <rubysig.h>
+#ifdef RUBY18
+  #include "rubysig.h"
+  #include "rubyio.h"
 #else
+  #include "ruby/io.h" 
   #define TRAP_BEG
   #define TRAP_END
 #endif
@@ -45,18 +46,28 @@ static VALUE rb_aio_read( aiocb_t *cb ){
 }
 
 static VALUE rb_aio_s_read( int argc, VALUE* argv, VALUE aio ){
+#ifdef RUBY18
 	OpenFile *fptr;
+#else	
+	rb_io_t *fptr;
+#endif
 	VALUE fname, length, offset, io;
-	int fd, err, ret; 
     struct stat stats;
+	int fd;
     aiocb_t cb;
-
+ 
     rb_scan_args(argc, argv, "03", &fname, &length, &offset);
     Check_Type(fname, T_STRING);
 	io = rb_file_open(RSTRING_PTR(fname), "r");
 	GetOpenFile(io, fptr);
 	rb_io_check_readable(fptr); 	
-    
+ 
+#ifdef RUBY18
+	fd = fileno(fptr->f);
+#else	
+	fd = fptr->fd;
+#endif
+   
     if (offset == Qnil)
       offset = INT2FIX(0);
     if (length == Qnil){
@@ -68,8 +79,8 @@ static VALUE rb_aio_s_read( int argc, VALUE* argv, VALUE aio ){
 	
     cb.aio_buf = malloc(NUM2INT(length) + 1);
 	if (!cb.aio_buf) rb_raise( rb_eIOError, "not able to allocate a read buffer" );
-	
-	cb.aio_fildes = fileno(fptr->f);
+
+	cb.aio_fildes = fd;
 	cb.aio_nbytes = NUM2INT(length);
 	cb.aio_offset = NUM2INT(offset);
 	cb.aio_sigevent.sigev_notify = SIGEV_NONE;

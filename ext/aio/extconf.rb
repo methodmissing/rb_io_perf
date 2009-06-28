@@ -8,7 +8,7 @@ dir_config('aio')
 
 have_func('aio_read', 'aio.h')
 
-add_define 'HAVE_RBTRAP' if have_var('rb_trap_immediate', ['ruby.h', 'rubysig.h'])
+add_define 'RUBY18' if have_var('rb_trap_immediate', ['ruby.h', 'rubysig.h'])
 
 $CFLAGS << ' -lrt'
 
