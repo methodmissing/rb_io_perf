@@ -18,6 +18,14 @@
 #define RSTRING_LEN(obj) RSTRING(obj)->len
 #endif
 
+#ifndef RARRAY_PTR
+#define RARRAY_PTR(obj) RARRAY(obj)->ptr
+#endif
+ 
+#ifndef RARRAY_LEN
+#define RARRAY_LEN(obj) RARRAY(obj)->len
+#endif
+
 #ifdef RUBY18
   #include "rubysig.h"
   #include "rubyio.h"
@@ -27,72 +35,92 @@
   #define TRAP_END
 #endif
 
+#define AIO_MAX_LIST 16
+
 typedef struct aiocb aiocb_t;
 
-static VALUE rb_aio_read( aiocb_t *cb ){
-	int err, ret;
-	TRAP_BEG;
-    ret = aio_read( cb );
-	TRAP_END;
-	if (ret < 0) rb_raise( rb_eIOError, "read schedule failure" );
-    
-	while ( err = aio_error( cb ) == EINPROGRESS );
+struct aio_read_multi_args {
+	aiocb_t **list;
+	int reads; 
+};
+
+static VALUE rb_aio_read( struct aio_read_multi_args *args ){
+	int op, ret;
+    VALUE results = rb_ary_new2( args->reads );
 	
-	if ((ret = aio_return( cb )) > 0) {
-		return rb_tainted_str_new((*cb).aio_buf, ret);
-    } else {
-		return INT2NUM(ret);
+	TRAP_BEG;
+    ret = lio_listio( LIO_WAIT, (*args).list, args->reads, NULL );
+	TRAP_END;
+	if (ret != 0) rb_raise( rb_eIOError, "read multi schedule failure" );
+
+    for (op=0; op < args->reads; op++) {
+		rb_ary_push( results, rb_tainted_str_new( (*args->list)[op].aio_buf, (*args->list)[op].aio_nbytes ) );
     }
+	return results;
 }
 
-static VALUE rb_aio_s_read( int argc, VALUE* argv, VALUE aio ){
+static void rb_io_closes( VALUE ios ){
+  int io;
+
+  for (io=0; io < RARRAY_LEN(ios); io++) {
+	 rb_io_close( RARRAY_PTR(ios)[io] );
+   } 
+}
+
+static VALUE rb_aio_s_read( VALUE aio, VALUE files ){
 #ifdef RUBY18
-	OpenFile *fptr;
+	OpenFile *fptrs[AIO_MAX_LIST];
 #else	
-	rb_io_t *fptr;
+	rb_io_t *fptrs[AIO_MAX_LIST];
 #endif
-	VALUE fname, length, offset, io;
+    struct aio_read_multi_args args;
+	int fd, length, op;
     struct stat stats;
-	int fd;
-    aiocb_t cb;
- 
-    rb_scan_args(argc, argv, "03", &fname, &length, &offset);
-    Check_Type(fname, T_STRING);
-	io = rb_file_open(RSTRING_PTR(fname), "r");
-	GetOpenFile(io, fptr);
-	rb_io_check_readable(fptr); 	
- 
+	aiocb_t cb[AIO_MAX_LIST];
+	aiocb_t *list[AIO_MAX_LIST]; 
+	
+	int reads = RARRAY_LEN(files);
+	VALUE ios = rb_ary_new2( reads );
+	VALUE io;    
+
+    bzero( (char *)list, sizeof(list) );
+    for (op=0; op < reads; op++) {
+      Check_Type(RARRAY_PTR(files)[op], T_STRING);
+      io = rb_file_open(RSTRING_PTR(RARRAY_PTR(files)[op]), "r");
+	  rb_ary_push( ios, io );
+	  GetOpenFile(io, fptrs[op]);
+	  rb_io_check_readable(fptrs[op]); 	
+
 #ifdef RUBY18
-	fd = fileno(fptr->f);
+  	  fd = fileno(fptrs[op]->f);
 #else	
-	fd = fptr->fd;
+  	  fd = fptrs[op]->fd;
 #endif
-   
-    if (offset == Qnil)
-      offset = INT2FIX(0);
-    if (length == Qnil){
       fstat(fd, &stats);
-      length = INT2FIX(stats.st_size);
+      length = stats.st_size;
+
+      bzero(&cb[op], sizeof(aiocb_t));
+
+	  cb[op].aio_buf = malloc(length + 1);
+ 	  if (!cb[op].aio_buf) rb_raise( rb_eIOError, "not able to allocate a read buffer" );
+
+  	  cb[op].aio_fildes = fd;
+	  cb[op].aio_nbytes = length;
+	  cb[op].aio_offset = 0;
+	  cb[op].aio_sigevent.sigev_notify = SIGEV_NONE;
+	  cb[op].aio_sigevent.sigev_signo = 0;
+	  cb[op].aio_sigevent.sigev_value.sival_int = 0;
+	  cb[op].aio_lio_opcode = LIO_READ;
+      list[op] = &cb[op];
     }
-
-	(void) memset(&cb, 0, sizeof(struct aiocb));
-	
-    cb.aio_buf = malloc(NUM2INT(length) + 1);
-	if (!cb.aio_buf) rb_raise( rb_eIOError, "not able to allocate a read buffer" );
-
-	cb.aio_fildes = fd;
-	cb.aio_nbytes = NUM2INT(length);
-	cb.aio_offset = NUM2INT(offset);
-	cb.aio_sigevent.sigev_notify = SIGEV_NONE;
-	cb.aio_sigevent.sigev_signo = 0;
-	cb.aio_reqprio = 0;
-	
-	return rb_ensure( rb_aio_read, &cb, rb_io_close, io );
-}	 
+	args.list = list;
+	args.reads = reads;
+    return rb_ensure( rb_aio_read, &args, rb_io_closes, ios );
+}
 
 void Init_aio()
 {
 
-    rb_define_module_function( rb_cIO, "aio_read", rb_aio_s_read, -1 );
+    rb_define_module_function( rb_cIO, "aio_read", rb_aio_s_read, -2 );
 
 }
